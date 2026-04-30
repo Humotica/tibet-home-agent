@@ -1,4 +1,4 @@
-# AInternet Home Agent
+# TIBET Home Agent
 
 [![PyPI version](https://img.shields.io/pypi/v/tibet-home-agent.svg)](https://pypi.org/project/tibet-home-agent/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

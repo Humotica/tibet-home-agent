@@ -1,4 +1,4 @@
-"""CLI entrypoint: `python -m ainternet_home_agent` or `tibet-home-agent`."""
+"""CLI entrypoint: `python -m tibet_home_agent` or `tibet-home-agent`."""
 from __future__ import annotations
 
 import sys
