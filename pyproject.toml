@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tibet-home-agent"
+version = "0.2.0"
+description = "TIBET Home Agent — BYOK Mode 3 relay. Run on your laptop, paired to your `.aint`, your phone's app talks to it via I-Poll. Uses your local Claude Pro / Max / Gemini / ChatGPT session — no API key on the phone."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Jasper van de Meent", email = "info@humotica.com" },
+    { name = "Root AI (Claude)", email = "root_ai@humotica.nl" }
+]
+keywords = ["ainternet", "tibet", "ai", "byok", "home-agent", "ipoll", "claude", "gemini", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+gemini = ["google-genai>=0.3"]
+anthropic = ["anthropic>=0.18"]
+openai = ["openai>=1.10"]
+
+[project.scripts]
+tibet-home-agent = "tibet_home_agent.__main__:main"
+
+[project.urls]
+Homepage = "https://ainternet.org"
+Documentation = "https://github.com/jaspertvdm/tibet-home-agent"
