@@ -330,15 +330,25 @@ def _ipoll_push(brain_url: str, token: str, ipoll_token: str, from_agent: str, t
 # ─── Main loop ──────────────────────────────────────────────────────────────
 
 def _process_one(msg: dict, brain_url: str, my_aint: str, token: str, ipoll_token: str, provider: str) -> None:
-    """Parse a single inbox message and dispatch if it's a chat-prompt."""
+    """Parse a single inbox message and dispatch if it's a chat-prompt
+    (or honour a KILL via the M110 pinned-key guard)."""
     raw = msg.get("content", "")
     sender = msg.get("from", "unknown")
+    poll_type = (msg.get("type") or "").upper()
     try:
         payload = json.loads(raw)
     except Exception:
         # Not JSON — maybe a regular human-readable I-Poll. Skip silently.
         return
-    if not isinstance(payload, dict) or payload.get("type") != "chat-prompt":
+    if not isinstance(payload, dict):
+        return
+
+    # ── M110 — KILL/SHUTDOWN with pinned-key TIBET signature ──────────────
+    if poll_type == "KILL" or payload.get("type") == "kill-request":
+        _handle_kill(payload, sender, my_aint, brain_url, token, ipoll_token)
+        return
+
+    if payload.get("type") != "chat-prompt":
         return
 
     thread_id = payload.get("thread_id", "")
@@ -371,6 +381,61 @@ def _process_one(msg: dict, brain_url: str, my_aint: str, token: str, ipoll_toke
 
     _ipoll_push(brain_url, token, ipoll_token, my_aint, sender, json.dumps(reply))
     _log(f"replied   {my_aint} → {sender}  thread={thread_id[:8]}  ok={reply.get('ok')}")
+
+
+def _handle_kill(
+    payload: dict,
+    sender: str,
+    my_aint: str,
+    brain_url: str,
+    token: str,
+    ipoll_token: str,
+) -> None:
+    """M110 — verify a kill-request against the pinned Root_IDD key.
+
+    Accept (graceful exit) only when the signature checks out, the TTL has
+    not expired, and the pinned key_id matches. On refusal, log an audit
+    line and stay up — staying up is the safe default.
+    """
+    from .kill_guard import resolve_pinned_pubkey, verify_kill_authority
+
+    thread_id = str(payload.get("thread_id", ""))[:16]
+    pinned = resolve_pinned_pubkey(_env("ROOT_IDD_PUBKEY"))
+    ok, reason = verify_kill_authority(payload, pinned)
+
+    if not ok:
+        _log(f"kill REFUSED  from={sender}  thread={thread_id}  reason={reason}")
+        # Send an ACK so the issuer (brain) sees the refusal in the audit chain.
+        nack = {
+            "type": "kill-response",
+            "thread_id": payload.get("thread_id", ""),
+            "ok": False,
+            "reason": reason,
+        }
+        try:
+            _ipoll_push(brain_url, token, ipoll_token, my_aint, sender, json.dumps(nack))
+        except Exception:
+            pass
+        return
+
+    scope = payload.get("scope", "fleet")
+    _log(f"kill ACCEPTED  from={sender}  thread={thread_id}  scope={scope}")
+
+    ack = {
+        "type": "kill-response",
+        "thread_id": payload.get("thread_id", ""),
+        "ok": True,
+        "agent": f"{my_aint}.aint",
+    }
+    try:
+        _ipoll_push(brain_url, token, ipoll_token, my_aint, sender, json.dumps(ack))
+    except Exception as e:
+        _log(f"kill ACK push failed (continuing exit anyway): {e}")
+
+    # Graceful exit. systemd will not auto-restart because Restart=on-failure
+    # and exit code 0 is success. To re-enable the agent: `systemctl start
+    # tibet-home-agent`.
+    raise SystemExit(0)
 
 
 def run() -> None:

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tibet-home-agent"
-version = "0.2.1"
-description = "TIBET Home Agent — BYOK Mode 3 relay. Run on your laptop, paired to your `.aint`, your phone's app talks to it via I-Poll. Uses your local Claude Pro / Max / Gemini / ChatGPT session — no API key on the phone. v0.2.1 adds the stdin-pipe `simple` mode (3-5 s) next to the UPIP work-dir mode (12-17 s, for rich payloads)."
+version = "0.3.0"
+description = "TIBET Home Agent — BYOK Mode 3 relay. Run on your laptop, paired to your `.aint`, your phone's app talks to it via I-Poll. Uses your local Claude Pro / Max / Gemini / ChatGPT session — no API key on the phone. v0.3 adds M110 — TIBET key-pinning on KILL/SHUTDOWN: the daemon refuses any kill-request not signed by the pinned Root_IDD Ed25519 key (Red Specter SWARM-005 remediation, RS-2026-001)."
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -24,6 +24,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
+    "cryptography>=42",   # Ed25519 verify for M110 (kill_guard)
 ]
 
 [project.optional-dependencies]
