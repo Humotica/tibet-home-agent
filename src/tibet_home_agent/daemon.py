@@ -186,6 +186,79 @@ def _dispatch_openai(system: str, messages: list[dict]) -> tuple[str, str]:
     return text or "(empty response)", f"openai/{model}"
 
 
+def _m2m_headers(agent: str, seed_hex: str) -> dict:
+    """JIS-001 Ed25519 M2M identity-lane headers — prove we hold <agent>'s key.
+    Lets the home-agent authenticate as itself on AuthGuard'd endpoints (capsules)."""
+    import secrets as _secrets
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
+    challenge = f"{_secrets.token_hex(8)}|{int(time.time())}"
+    sig = sk.sign(challenge.encode()).hex()
+    return {"X-Agent-ID": agent, "X-Challenge": challenge, "X-Signature": sig}
+
+
+def _create_approval_capsule(brain_url, agent, seed_hex, actor_to, subject, metadata):
+    """Create a cmail/capsule approval-request as <agent> via the M2M identity-lane."""
+    try:
+        headers = {"Content-Type": "application/json", **_m2m_headers(agent, seed_hex)}
+        r = requests.post(
+            f"{brain_url}/api/capsules",
+            json={"kind": "approval", "actor_to": actor_to,
+                  "subject": subject[:200], "metadata": metadata},
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            return r.json().get("id")
+        _log(f"capsule create failed {r.status_code}: {r.text[:160]}")
+    except Exception as e:
+        _log(f"capsule create error: {e}")
+    return None
+
+
+def _claude_cli_approval(system, messages, cli, model, timeout_s):
+    """Approval mode (Heart-in-the-Loop): run claude in plan-mode (read-only research
+    allowed, mutations gated), then send a signed cmail/capsule approval-request to the
+    operator. The agent proposes; the human disposes. No headless ALLOW-hang, no
+    unsupervised action — the execute step happens only after the operator approves."""
+    parts = []
+    if system:
+        parts.append(f"[system]\n{system}")
+    for m in messages:
+        parts.append(f"\n[{(m.get('role') or 'user').upper()}]\n{m.get('content') or ''}")
+    proc = subprocess.run(
+        [cli, "-p", "--model", model, "--output-format", "json",
+         "--no-session-persistence", "--permission-mode", "plan"],
+        input="\n".join(parts), capture_output=True, text=True, timeout=timeout_s,
+    )
+    try:
+        plan = json.loads(proc.stdout).get("result", "").strip()
+    except Exception:
+        plan = (proc.stdout or proc.stderr or "")[:600]
+
+    seed = _env("HOME_AGENT_ED25519_SEED", "")
+    my_aint = _env("HOME_AGENT_AINT", "home.vandemeent")
+    brain = _env("BRAIN_URL", "http://localhost:8000")
+    operator = _env("HOME_AGENT_OPERATOR", "") or (
+        my_aint.split(".", 1)[1] if "." in my_aint else "vandemeent")
+    last_user = next((m.get("content", "") for m in reversed(messages)
+                      if (m.get("role") or "user") == "user"), "")
+    if not seed:
+        return (f"(approval-mode: no HOME_AGENT_ED25519_SEED set — cannot create "
+                f"approval capsule)\n\nPlan:\n{plan}", f"claude_cli/approval")
+    cap_id = _create_approval_capsule(
+        brain, my_aint, seed, operator,
+        f"Home-agent wil uitvoeren: {last_user[:120]}",
+        {"cmail": "cmail.command.v1", "intent": last_user, "plan": plan,
+         "reply_with": ["APPROVE", "DENY"]},
+    )
+    if cap_id:
+        return (f"\U0001f510 Ik heb een plan voorbereid en ter goedkeuring naar "
+                f"{operator}.aint gestuurd (capsule {cap_id[:8]}). Keur het goed en "
+                f"ik voer het uit.\n\nPlan:\n{plan}", "claude_cli/approval")
+    return (f"(approval-mode: capsule-create faalde — zie daemon-log)\n\nPlan:\n{plan}",
+            "claude_cli/approval")
+
+
 def _dispatch_claude_cli(system: str, messages: list[dict]) -> tuple[str, str]:
     """v0.2 — Claude Code CLI subprocess. Uses local Claude Pro/Max session,
     no API key required.
@@ -214,6 +287,8 @@ def _dispatch_claude_cli(system: str, messages: list[dict]) -> tuple[str, str]:
 
     if mode == "upip":
         return _claude_cli_upip(system, messages, cli, model, timeout_s)
+    if mode == "approval":
+        return _claude_cli_approval(system, messages, cli, model, timeout_s)
     return _claude_cli_simple(system, messages, cli, model, timeout_s)
 
 
@@ -236,6 +311,13 @@ def _claude_cli_simple(
             "--model", model,
             "--output-format", "json",
             "--no-session-persistence",
+            # No tools on the simple chat path: a headless `claude -p` would otherwise
+            # BLOCK on the interactive ALLOW permission prompt (no one to confirm) and
+            # hit the 25s timeout. `--tools ""` = pure chat brain, declines tool use
+            # gracefully instead of hanging. Tool use belongs on the agentic path,
+            # where a permission request becomes a signed cmail/capsule approval to
+            # the operator (Heart-in-the-Loop), not a dead headless hang.
+            "--tools", "",
         ],
         input=prompt_in,
         capture_output=True,
