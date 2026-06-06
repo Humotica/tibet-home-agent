@@ -216,25 +216,12 @@ def _create_approval_capsule(brain_url, agent, seed_hex, actor_to, subject, meta
 
 
 def _claude_cli_approval(system, messages, cli, model, timeout_s):
-    """Approval mode (Heart-in-the-Loop): run claude in plan-mode (read-only research
-    allowed, mutations gated), then send a signed cmail/capsule approval-request to the
-    operator. The agent proposes; the human disposes. No headless ALLOW-hang, no
-    unsupervised action — the execute step happens only after the operator approves."""
-    parts = []
-    if system:
-        parts.append(f"[system]\n{system}")
-    for m in messages:
-        parts.append(f"\n[{(m.get('role') or 'user').upper()}]\n{m.get('content') or ''}")
-    proc = subprocess.run(
-        [cli, "-p", "--model", model, "--output-format", "json",
-         "--no-session-persistence", "--permission-mode", "plan"],
-        input="\n".join(parts), capture_output=True, text=True, timeout=timeout_s,
-    )
-    try:
-        plan = json.loads(proc.stdout).get("result", "").strip()
-    except Exception:
-        plan = (proc.stdout or proc.stderr or "")[:600]
-
+    """Approval mode (Heart-in-the-Loop): create a signed cmail/capsule approval-request
+    DIRECTLY from the raw intent. We do NOT call the Claude CLI here — a headless plan-mode
+    call hangs (~25s) and the capsule never forms (that was the 6-juni 502 regression, Codex
+    audit #5). The agent proposes via the capsule; the operator disposes; the bounded CLI runs
+    only AFTER approval (in _execute_approved_capsules). system/cli/model/timeout_s are unused
+    here by design."""
     seed = _env("HOME_AGENT_ED25519_SEED", "")
     my_aint = _env("HOME_AGENT_AINT", "home.vandemeent")
     brain = _env("BRAIN_URL", "http://localhost:8000")
@@ -242,9 +229,11 @@ def _claude_cli_approval(system, messages, cli, model, timeout_s):
         my_aint.split(".", 1)[1] if "." in my_aint else "vandemeent")
     last_user = next((m.get("content", "") for m in reversed(messages)
                       if (m.get("role") or "user") == "user"), "")
+    plan = ("Bounded execution after your approval (tools: Bash Read Grep Glob):\n"
+            f"{last_user}")
     if not seed:
-        return (f"(approval-mode: no HOME_AGENT_ED25519_SEED set — cannot create "
-                f"approval capsule)\n\nPlan:\n{plan}", f"claude_cli/approval")
+        return ("(approval-mode: no HOME_AGENT_ED25519_SEED set — cannot create approval capsule)",
+                "claude_cli/approval")
     cap_id = _create_approval_capsule(
         brain, my_aint, seed, operator,
         f"Home-agent wil uitvoeren: {last_user[:120]}",
@@ -252,11 +241,10 @@ def _claude_cli_approval(system, messages, cli, model, timeout_s):
          "reply_with": ["APPROVE", "DENY"]},
     )
     if cap_id:
-        return (f"\U0001f510 Ik heb een plan voorbereid en ter goedkeuring naar "
-                f"{operator}.aint gestuurd (capsule {cap_id[:8]}). Keur het goed en "
-                f"ik voer het uit.\n\nPlan:\n{plan}", "claude_cli/approval")
-    return (f"(approval-mode: capsule-create faalde — zie daemon-log)\n\nPlan:\n{plan}",
-            "claude_cli/approval")
+        return (f"\U0001f510 Ik heb je verzoek ter goedkeuring naar {operator}.aint gestuurd "
+                f"(capsule {cap_id[:8]}). Keur het goed, dan voer ik het begrensd uit.",
+                "claude_cli/approval")
+    return ("(approval-mode: capsule-create faalde — zie daemon-log)", "claude_cli/approval")
 
 
 def _dispatch_claude_cli(system: str, messages: list[dict]) -> tuple[str, str]:
