@@ -215,20 +215,55 @@ def _create_approval_capsule(brain_url, agent, seed_hex, actor_to, subject, meta
     return None
 
 
+_ACTION_SENTINEL = "NEEDS_ACTION:"
+
+_TRIAGE_SYSTEM = (
+    "You are a home-agent for a real person. Decide per message:\n"
+    "- If the user is just conversing or asking a question (read-only, no side "
+    "effects) — answer it directly, helpfully and briefly.\n"
+    "- If the user is requesting an ACTION that uses tools or causes side effects "
+    "(send / create / delete / modify / move data / pay / schedule / deploy / "
+    "contact someone / run a command) — do NOT perform or answer it. Reply with "
+    "EXACTLY one line and nothing else:\n"
+    "  NEEDS_ACTION: <concise description of the action>"
+)
+
+
 def _claude_cli_approval(system, messages, cli, model, timeout_s):
-    """Approval mode (Heart-in-the-Loop): create a signed cmail/capsule approval-request
-    DIRECTLY from the raw intent. We do NOT call the Claude CLI here — a headless plan-mode
-    call hangs (~25s) and the capsule never forms (that was the 6-juni 502 regression, Codex
-    audit #5). The agent proposes via the capsule; the operator disposes; the bounded CLI runs
-    only AFTER approval (in _execute_approved_capsules). system/cli/model/timeout_s are unused
-    here by design."""
+    """Heart-in-the-Loop — but ONLY for actions.
+
+    A plain question / conversation is answered directly (tool-less, the fast
+    `--tools ""` path — NOT the plan-mode call that hung ~25s in the 6-juni 502
+    regression). Only an action-intent (real side effects) becomes a signed
+    cmail/capsule approval-request that the operator disposes; the bounded CLI
+    then runs after approval in _execute_approved_capsules.
+
+    One tool-less pass triages: the model either answers the chat, or
+    self-declares `NEEDS_ACTION: ...`. This stops the absurd over-gating where
+    'hey waar hadden we het over?' was turned into an approval capsule."""
+    triage_sys = f"{system}\n\n{_TRIAGE_SYSTEM}" if system else _TRIAGE_SYSTEM
+    answer = ""
+    try:
+        answer, _src = _claude_cli_simple(triage_sys, messages, cli, model, timeout_s)
+    except Exception as e:
+        _log(f"approval-triage call failed, treating as action: {e}")
+
+    # Conversational → hand the answer straight back, no capsule.
+    if answer and _ACTION_SENTINEL not in answer:
+        return (answer, "claude_cli/approval-chat")
+
+    # Action intent → Heart-in-the-Loop capsule.
+    last_user = next((m.get("content", "") for m in reversed(messages)
+                      if (m.get("role") or "user") == "user"), "")
+    action_desc = last_user
+    if answer and _ACTION_SENTINEL in answer:
+        action_desc = answer.split(_ACTION_SENTINEL, 1)[1].strip() or last_user
+
     seed = _env("HOME_AGENT_ED25519_SEED", "")
     my_aint = _env("HOME_AGENT_AINT", "home.vandemeent")
     brain = _env("BRAIN_URL", "http://localhost:8000")
     operator = _env("HOME_AGENT_OPERATOR", "") or (
         my_aint.split(".", 1)[1] if "." in my_aint else "vandemeent")
-    last_user = next((m.get("content", "") for m in reversed(messages)
-                      if (m.get("role") or "user") == "user"), "")
     plan = ("Bounded execution after your approval (tools: Bash Read Grep Glob):\n"
             f"{last_user}")
     if not seed:
@@ -236,9 +271,9 @@ def _claude_cli_approval(system, messages, cli, model, timeout_s):
                 "claude_cli/approval")
     cap_id = _create_approval_capsule(
         brain, my_aint, seed, operator,
-        f"Home-agent wil uitvoeren: {last_user[:120]}",
-        {"cmail": "cmail.command.v1", "intent": last_user, "plan": plan,
-         "reply_with": ["APPROVE", "DENY"]},
+        f"Home-agent wil uitvoeren: {action_desc[:120]}",
+        {"cmail": "cmail.command.v1", "intent": last_user, "action": action_desc,
+         "plan": plan, "reply_with": ["APPROVE", "DENY"]},
     )
     if cap_id:
         return (f"\U0001f510 Ik heb je verzoek ter goedkeuring naar {operator}.aint gestuurd "
